@@ -40,7 +40,7 @@ def collect_core(root,profile,name,day,start,end):
   if p!=checkpoint and read(p).get('status') not in ('complete','skipped_permission'):raise ValueError('其他独立采集断点未完成：'+str(p))
  z.configure_runtime(root,profile);z.STATE=checkpoint
  run=read(checkpoint) if checkpoint.exists() else {'run_date':run_day,'status':'ready','index':0,'steps':steps,'results':[],'options':{'function':name}}
- if run.get('store_id',profile['store_id'])!=profile['store_id'] or run['steps']!=steps:raise ValueError('独立断点身份或日期冲突')
+ if run.get('store_id',profile['store_id'])!=profile['store_id'] or [{k:s.get(k) for k in ('kind','start','end')} for s in run['steps']]!=steps:raise ValueError('独立断点身份或日期冲突')
  z.write(run)
  if run['status']=='complete':
   z.final_gate(run['results'],steps,root,profile['store_id']);return run
