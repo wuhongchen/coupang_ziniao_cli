@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -eu
+WING_EXPORT_DIR="$(cd "$(dirname "$0")" && pwd)"
+WING_EXPORT_ENTRY="$WING_EXPORT_DIR/backend/ziniao_exports.py"
+if [[ ! -f "$WING_EXPORT_ENTRY" ]]; then WING_EXPORT_ENTRY="$WING_EXPORT_DIR/../backend/ziniao_exports.py"; fi
+exec "${WING_EXPORT_PYTHON:-python3}" "$WING_EXPORT_ENTRY" "$@"
