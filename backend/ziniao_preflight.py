@@ -19,9 +19,14 @@ def page_error(info):
  if url.startswith('chrome-error:') or re.search(r'ERR_(?:SOCKS|CONNECTION|NAME_NOT_RESOLVED|TIMED_OUT)',text):return 'NETWORK_UNAVAILABLE'
  if re.search(r'^(?:Access Denied|Forbidden|权限不足|没有访问权限|접근 권한)',text.strip(),re.I):return 'PERMISSION_DENIED'
  return None
+class PagePermissionDenied(RuntimeError):
+ pass
+
 def guard(info):
  code=page_error(info)
- if code:raise RuntimeError(code+' ('+urlsplit(info.get('url',''))._replace(query='',fragment='').geturl()+'): 页面不可用于下载；保留断点，正常恢复登录、验证码、权限或网络后续跑，不重放下载点击')
+ if code:
+  error=PagePermissionDenied if code=='PERMISSION_DENIED' else RuntimeError
+  raise error(code+' ('+urlsplit(info.get('url',''))._replace(query='',fragment='').geturl()+'): 页面不可用于下载；保留断点，正常恢复登录、验证码、权限或网络后续跑，不重放下载点击')
 def invoke(args):
  for attempt in range(3):
   result=subprocess.run([executable(),*args],capture_output=True,text=True,encoding='utf-8',timeout=50,shell=False)

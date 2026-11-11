@@ -112,6 +112,14 @@ API Key 不接收命令行明文，可选择本机已有配置，或用以下一
 
 `inventory` 是本地文件盘点；`collect inventory` 才是在线库存下载。`ads download` / `ads collect` 是广告下载别名，范围参数同 `collect ads-keywords`。`import` 导入已有核心报表，需传 `--file`、`--kind`、`--start` 和 `--end`。`analyze` 只解释已有数据，不代表已采齐。
 
+## 合并与统计
+
+运行 `wing-ops --output-root "$DATA_ROOT" stats` 会合并当前店铺已归档的销售日报与逐日广告报表。可用 `--start YYYY-MM-DD --end YYYY-MM-DD` 限定业务日期。输出目录含按日统计 CSV、按日期和投放选项合并的 CSV、带来源和覆盖日期的 JSON 摘要。相互重叠的广告报表每个业务日只取最新下载版本。区间销售表不会重复计入日报；缺失值在 CSV 中留空。
+
+## 本地经营分析
+
+运行 `wing-ops --output-root "$DATA_ROOT" analyze` 可分析已有归档，无需重新下载或调用 AI。返回的 `analysis` 是原有 JSON 汇总，`business_report` 是中文 Markdown 报告。报告分别列出销售与逐日核对、库存补货、退货、广告效果与账单、结算费用和商品评价；各节注明报表周期，缺失和权限受限项单列。
+
 ## 保存路径
 
 ```text

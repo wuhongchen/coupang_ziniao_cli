@@ -83,9 +83,10 @@ def collect_supplement(root,profile,name,day,period=None,start=None,end=None,cat
  elif name.startswith('ads-bill-'):c.bills(current=name=='ads-bill-current')
  elif name in FEES:c.fees(only=FEES[name],period=period,settlement_batch=settlement_batch)
  elif name in ('category','products','keywords-traffic'):
+  if c.run.get('status')=='skipped_permission':
+   c.run.pop('error',None);c.run['status']='running';c.save()
   try:c.pages(section={'keywords-traffic':'keywords'}.get(name,name))
-  except RuntimeError as exc:
-   if 'DATA_PERMISSION_DENIED:' not in str(exc):raise
+  except preflight.PagePermissionDenied as exc:
    c.run.update(status='skipped_permission',function=name,error=runtime.redact(exc));c.save();return c.run
  elif name=='reviews':c.reviews()
  for entry in c.run['steps'].values():
@@ -104,6 +105,7 @@ def main(argv=None):
  q=sub.add_parser('choices',help='列出本店已核验报表中的候选项');q.add_argument('kind',choices=['settlement','category'])
  q=sub.add_parser('import');q.add_argument('--file',type=Path,required=True);q.add_argument('--kind',choices=CORE.values(),required=True);q.add_argument('--start',required=True);q.add_argument('--end',required=True)
  sub.add_parser('analyze')
+ q=sub.add_parser('stats',help='合并本地逐日销售和广告并导出统计表');q.add_argument('--start');q.add_argument('--end')
  q=sub.add_parser('sales-days',help='指定天数逐日导出并生成分析');q.add_argument('--end',required=True);q.add_argument('--days',type=int,required=True);q.add_argument('--refresh',action='store_true')
  for group in ('bills','advertising','analytics'):
   q=sub.add_parser(group);q.add_argument('--date');q.add_argument('--start');q.add_argument('--end');q.add_argument('--category-id');q.add_argument('--fee-interval-days',type=int)
@@ -135,7 +137,7 @@ def main(argv=None):
    if a.function in ('ads-keywords','keywords-traffic') and not (a.start and a.end):raise ValueError('必须明确--start和--end')
    if a.function=='category' and not a.category_id and lookup is None:raise ValueError('必须明确--category-id')
    if a.function in FEES and (a.fee_interval_days is None or a.fee_interval_days<=0):raise ValueError('必须明确--fee-interval-days正整数')
-  if a.command=='catalog':out={'capabilities':CATALOG,'local':['doctor','stores','check-store','inventory','archive','import','analyze','sales-days'],'ads':['download','collect'],'groups':['bills','advertising','analytics'],'scheduling':'disabled: CLI never creates schedules'}
+  if a.command=='catalog':out={'capabilities':CATALOG,'local':['doctor','stores','check-store','inventory','archive','import','analyze','stats','sales-days'],'ads':['download','collect'],'groups':['bills','advertising','analytics'],'scheduling':'disabled: CLI never creates schedules'}
   elif a.command=='doctor':out={'status':'complete','environment':preflight.doctor()}
   elif a.command=='stores':out=preflight.stores()
   else:
@@ -151,7 +153,10 @@ def main(argv=None):
      if settlement_batch:raise ValueError('--match 与 --settlement-batch 请选择一种')
      settlement_batch=a.settlement_batch=choose(candidates(root,profile['store_id'],'settlement'),lookup)
     else:raise ValueError('--match 仅适用于费用或类目')
-   if a.command=='choices':
+   if a.command=='stats':
+    from store_stats import stats
+    out=stats(root,profile,a.start,a.end)
+   elif a.command=='choices':
     from selection import candidates
     out={'status':'complete','store_id':profile['store_id'],'kind':a.kind,'choices':candidates(root,profile['store_id'],a.kind)}
    elif a.command in ('bills','advertising','analytics'):
@@ -196,9 +201,12 @@ def main(argv=None):
       result=accept_export(a.file,a.kind,a.start,a.end,root=root,store=profile['store_id']);out={'status':'complete','result':result,'archive':organize(root,run_info=run_info)}
      elif a.command=='analyze':
       from report_pipeline import export_analysis
+      from business_analysis import render_report
+      report_text=render_report(root,profile)
       result=export_analysis(root,profile['store_id'],profile['store_name'])
       target=root/'state/analyses'/(datetime.now(clock.timezone()).strftime('%Y-%m-%d_%H%M%S_%f')+'_store.json');write(target,result)
-      out={'status':'complete','analysis':str(target),'scope':'已核验销售与库存；非全链路完整分析','archive':organize(root,run_info=run_info)}
+      report=target.with_suffix('.md');report.write_text(report_text,encoding='utf-8')
+      out={'status':'complete','analysis':str(target),'business_report':str(report),'scope':'本店已归档经营数据','archive':organize(root,run_info=run_info)}
   status=out.get('status','complete')
   if 'archive' in out and out['archive'].get('status')!='complete':status='incomplete'
   finish(label,status)

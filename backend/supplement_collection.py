@@ -14,13 +14,30 @@ def validated_ad_scope(profile,period,selection):
     if any(selection.get(k) is not True for k in ('daily','structure','all_campaigns')) or selection.get('click_only') is not False:raise ValueError('广告导出范围未经页面确认，不可确认导出范围')
     return {'store_id':profile['store_id'],'merchant_code':profile['ads_identity'],'period':period,'daily':True,'all_campaigns':True,'all_keywords':True}
 
+from ziniao_preflight import PagePermissionDenied
+
 def check_data_access(info):
     from ziniao_preflight import guard,page_error
     if page_error(info) not in (None,'PERMISSION_DENIED'):guard(info)
     text=info.get('text','')
-    notices=('您没有权限','无权访问此功能','请订阅商业洞察','请开通商业洞察','未开通此功能','이용 권한이 없습니다','접근 권한이 없습니다')
-    if any(notice in text for notice in notices):raise RuntimeError('DATA_PERMISSION_DENIED: 页面明确提示：'+next(notice for notice in notices if notice in text))
+    notices=('您没有权限','无权访问此功能','未开通此功能','이용 권한이 없습니다','접근 권한이 없습니다')
+    if any(notice in text for notice in notices):raise PagePermissionDenied('DATA_PERMISSION_DENIED: 页面明确提示：'+next(notice for notice in notices if notice in text))
     guard(info)
+
+def insight_state(section, text):
+    if section == 'category':
+        if 'Top竞争商品' in text:
+            return 'ready'
+        gated = '立即订阅查看详情' in text and '免费试用商业洞察' in text
+    else:
+        if '搜索词分析数据不足' in text:
+            return 'insufficient_data'
+        if '搜索曝光量' in text or '查看该关键词的竞争商品' in text:
+            return 'ready'
+        gated = '订阅商业洞察，查看强化版数据' in text
+    if gated or '请订阅商业洞察' in text or '请开通商业洞察' in text:
+        raise PagePermissionDenied('DATA_PERMISSION_DENIED: '+('品类榜单' if section=='category' else '关键词明细')+'要求订阅商业洞察')
+    return None
 
 class Collector:
     def __init__(self,root,profile,run_date,start=None,end=None,category_id=None):
@@ -223,9 +240,7 @@ class Collector:
         pages=[];files=[]
         if section in (None,'category'):
             self.nav(f'https://wing.coupang.com/tenants/business-insight/category-analysis/detail?c_code={self.category_id}')
-            self.wait(lambda:'Top竞争商品' in self.text() or '立即订阅查看详情' in self.text() or '免费试用商业洞察' in self.text())
-            if 'Top竞争商品' not in self.text() and ('立即订阅查看详情' in self.text() or '免费试用商业洞察' in self.text()):
-                raise RuntimeError('DATA_PERMISSION_DENIED: 品类榜单要求订阅商业洞察')
+            self.wait(lambda:insight_state('category',self.text()))
             for tab in ['Top竞争商品','Top关键词','Top品牌']:
                 self.ct(tab,'a');self.wait(lambda:('查看Top10关键词' in self.text()) if tab=='Top竞争商品' else ('查看Top10商品' in self.text() and ('搜索量' in self.text() if tab=='Top关键词' else '搜索量' not in self.text())) )
                 nums=self.ev('[...document.querySelectorAll("a")].map(e=>e.innerText.trim()).filter(t=>/^[1-9]$/.test(t))') or ['1']
@@ -256,8 +271,7 @@ class Collector:
             try:
                 self.nav(f'https://wing.coupang.com/tenants/business-insight/sales-analysis/vendor-item-summary?vendorItemId={oid}&start_date={self.start}&end_date={self.end}')
                 self.wait(lambda:f'选项 ID: {oid}' in self.text())
-                if '订阅商业洞察，查看强化版数据' in self.text() and '搜索曝光量' not in self.text():raise RuntimeError('DATA_PERMISSION_DENIED: 关键词明细要求订阅商业洞察')
-                self.wait(lambda:'搜索曝光量' in self.text() or '搜索词分析数据不足' in self.text())
+                d['keyword_status']=self.wait(lambda:insight_state('keywords',self.text()))
                 for n in range(1,51):
                     selector=f'span[data-wuic-attrs^="page:{n}"] a'
                     if n>1:
@@ -271,6 +285,10 @@ class Collector:
                 self.ct('流入渠道','a');time.sleep(1);d['views']['流量渠道']=self.text()
                 self.ct('查看自然流量详情','label');d['views']['自然流量详情']=self.text()
                 for name in ['流量趋势','流量漏斗']:self.ct(name,'label');d['views'][name]=self.text()
+            except PagePermissionDenied as exc:
+                d['errors'].append(str(exc))
+                p.write_text(json.dumps(d,ensure_ascii=False,indent=2))
+                raise
             except Exception as e:d['errors'].append(str(e))
             p.write_text(json.dumps(d,ensure_ascii=False,indent=2))
             if d['errors']:raise RuntimeError(oid+' 页面采集未完成：'+d['errors'][0])
