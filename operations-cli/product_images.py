@@ -1,6 +1,7 @@
 """Read observed Wing product-row images; map options only through local verified batches."""
+from operation_progress import progress
 import runtime_clock as clock
-import re,time,urllib.parse,urllib.request
+import hashlib,re,tempfile,time,urllib.parse,urllib.request
 from pathlib import Path
 from datetime import datetime
 from storage import write,sha
@@ -20,6 +21,27 @@ def image_url(url):
  p=urllib.parse.urlsplit(url)
  if p.scheme!='https' or not re.fullmatch(r'image\d*\.coupangcdn\.com',p.netloc) or not p.path.startswith('/image/vendor_inventory/') or '..' in urllib.parse.unquote(p.path).split('/') or p.query or p.fragment or '\\' in url:raise ValueError('非受支持的已观察商品图片地址')
  return url
+
+def read_image(url,cache):
+ url=image_url(url)
+ cache.mkdir(parents=True,exist_ok=True)
+ path=cache/hashlib.sha256(url.encode()).hexdigest()
+ if path.is_file():
+  data=path.read_bytes()
+  if len(data)<=LIMIT:return data,image_type(data)
+ for attempt in range(3):
+  try:
+   with urllib.request.build_opener(NoRedirect()).open(url,timeout=12) as response:
+    data=response.read(LIMIT+1)
+   break
+  except (TimeoutError,urllib.error.URLError):
+   if attempt==2:raise
+ if len(data)>LIMIT:raise ValueError('图片超过12MB上限')
+ kind=image_type(data)
+ with tempfile.NamedTemporaryFile(dir=cache,delete=False) as f:
+  f.write(data)
+ Path(f.name).replace(path)
+ return data,kind
 
 def map_options(rows,mapping):
  return [{**r,'option_ids':sorted(oid for oid,pids in mapping.items() if pids=={r['product_id']}),'image_scope':'product_shared','option_specific_verified':False} for r in rows]
@@ -80,7 +102,7 @@ def collect(root,profile,target_id,product_id=None,option_id=None,all_products=F
    write(dest/('page_'+str(number)+'.json'),page)
    for item in page['rows']:
     pid=item['product_id']
-    js="""(()=>{document.querySelectorAll('[data-product-images-expand]').forEach(e=>e.removeAttribute('data-product-images-expand'));const a=[...document.querySelectorAll('.cell-product .ip-title[href]')].find(a=>new URL(a.href).searchParams.get('vendorInventoryId')===%s);const e=a?.closest('tr')?.querySelector('.cell-selector .list-v3-arrow');if(!e)return null;e.setAttribute('data-product-images-expand','1');return e.className})()"""%__import__('json').dumps(pid)
+    js="""(()=>{document.querySelectorAll('[data-product-images-expand]').forEach(e=>e.removeAttribute('data-product-images-expand'));const a=[...document.querySelectorAll('.cell-product .ip-title[href]')].find(a=>new URL(a.href).searchParams.get('vendorInventoryId')===%s);const e=a?.closest('tr')?.querySelector('.cell-selector .list-v3-arrow');if(!e)return null;e.scrollIntoView({block:'center',inline:'center',behavior:'instant'});e.setAttribute('data-product-images-expand','1');return e.className})()"""%__import__('json').dumps(pid)
     arrow=browser.evaluate(js)
     if arrow and 'down' in arrow:browser.click('[data-product-images-expand="1"]')
     deadline=time.monotonic()+15
@@ -102,12 +124,12 @@ def collect(root,profile,target_id,product_id=None,option_id=None,all_products=F
  if product_id:rows=[r for r in rows if r['product_id']==product_id]
  if not rows:raise ValueError('当前可见列表没有该商品；不猜测图片或自动改筛选')
  result={'store_id':profile['store_id'],'captured_at':stamp.isoformat(),'source_url':page['url'],'scope':'all_listed_products' if all_products else 'current_visible_product_rows','coverage':coverage,'option_mapping_sources':sources,'rows':[],'option_images':[],'errors':[]}
- for row in rows:
+ for index,row in enumerate(rows,1):
+  progress(f'正在核验商品及选项头图 [{index}/{len(rows)}]')
   try:
    row['image_url']=image_url(row['image_url'])
-   with urllib.request.build_opener(NoRedirect()).open(row['image_url'],timeout=20) as response:data=response.read(LIMIT+1)
-   if len(data)>LIMIT:raise ValueError('图片超过12MB上限')
-   kind=image_type(data);ext={'image/png':'.png','image/jpeg':'.jpg','image/gif':'.gif','image/webp':'.webp'}[kind]
+   data,kind=read_image(row['image_url'],root/'state/image_cache')
+   ext={'image/png':'.png','image/jpeg':'.jpg','image/gif':'.gif','image/webp':'.webp'}[kind]
    path=dest/'products'/row['product_id']/('main'+ext);path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(data)
    row.update(file=str(path),sha256=sha(path),media_type=kind,status='complete')
    for oid in row['option_ids']:
@@ -117,9 +139,7 @@ def collect(root,profile,target_id,product_id=None,option_id=None,all_products=F
      source=image_url(observed['image_url'])
      if source==row['image_url']:data0=data;kind0=kind
      else:
-      with urllib.request.build_opener(NoRedirect()).open(source,timeout=20) as response:data0=response.read(LIMIT+1)
-      if len(data0)>LIMIT:raise ValueError('选项图片超过12MB上限')
-      kind0=image_type(data0)
+      data0,kind0=read_image(source,root/'state/image_cache')
      ext0={'image/png':'.png','image/jpeg':'.jpg','image/gif':'.gif','image/webp':'.webp'}[kind0]
      opath=dest/'options'/oid/('main'+ext0);opath.parent.mkdir(parents=True,exist_ok=True);opath.write_bytes(data0)
      entry.update(file=str(opath),sha256=sha(opath),image_url=source,image_scope='option_row',option_specific_verified=True)

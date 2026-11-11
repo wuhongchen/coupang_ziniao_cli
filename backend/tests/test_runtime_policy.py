@@ -52,3 +52,15 @@ class PolicyTests(unittest.TestCase):
    commands=[c.args[2] for c in execute.call_args_list]
    self.assertIn('--category-id',commands[1]);self.assertIn('456',commands[1])
    self.assertIn('--start',commands[2]);self.assertIn('2020-01-03',commands[2])
+
+ def test_bills_pass_selected_batch_only_to_fee_downloads(self):
+  from groups import run_group
+  from unittest.mock import patch
+  profile={'browser_id':'123','store_id':'ziniao:123'}
+  batch=['2020-02-04','70','2020-01-01','2020-01-07']
+  with tempfile.TemporaryDirectory() as t,patch('groups.execute',return_value=[{'status':'complete'}]) as execute:
+   run_group(Path(t),profile,'bills','2020-02-04',1,settlement_batch=batch)
+  for call in execute.call_args_list:
+   command=call.args[2]
+   if command[1].startswith('fee-'):self.assertEqual(command[-5:],['--settlement-batch',*batch])
+   else:self.assertNotIn('--settlement-batch',command)

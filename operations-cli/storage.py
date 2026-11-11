@@ -1,5 +1,6 @@
 """Non-destructive, store/date/category archive of existing local exports."""
 import runtime_clock as clock
+from operation_progress import progress
 from pathlib import Path
 from datetime import date,datetime
 import csv,hashlib,json,re,shutil,sqlite3
@@ -146,6 +147,7 @@ def publish_basics(root,base,d):
 
 
 def organize(root,run_info=None):
+ progress("正在整理店铺归档并更新文件索引")
  root=Path(root).resolve();d=inventory(root);bid=d['store_id'].split(':',1)[1]
  base=(root/'data/stores'/bid).resolve();base.mkdir(parents=True,exist_ok=True)
  previous=read(base/'catalog.json') if (base/'catalog.json').exists() else {}

@@ -1,6 +1,7 @@
 """Collect observed Wing review-list DOM through Ziniao CLI, never private endpoints."""
 import hashlib,json,subprocess,time,re,uuid
 from datetime import datetime
+from operation_progress import progress
 from pathlib import Path
 import openpyxl
 
@@ -40,6 +41,7 @@ def collect(root,profile,run_date):
     if expected==0:raise RuntimeError('当前筛选未显示评价，需核验空列表提示；不把加载中状态当作零条')
     pages=[];seen=set()
     for number in range(1,501):
+        progress(f"正在读取评价第 {number} 页")
         deadline=time.monotonic()+20
         while True:
             d=ev(script)

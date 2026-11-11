@@ -21,7 +21,7 @@ def reusable(root,profile,key,on,period):
   rows=d.get('steps',{});entry=rows.get(key) if isinstance(rows,dict) else None
   if entry is None:
    entry=next((r for r in d.get('items',[]) if r.get('fee_kind')==key or ('_'+key+'_') in Path(r.get('file','')).name),None)
-  if not entry or entry.get('status')!='complete' or not all(entry.get(k) for k in ('file','sha256','captured_at')):continue
+  if not entry or entry.get('settlement_batch') or entry.get('status')!='complete' or not all(entry.get(k) for k in ('file','sha256','captured_at')):continue
   m=metadata(entry,on,period,True);candidates.append((m['last_download_date'],entry,m,str(path)))
  if not candidates:return None
  _,entry,m,source=max(candidates,key=lambda x:datetime.fromisoformat(x[1]['captured_at']))

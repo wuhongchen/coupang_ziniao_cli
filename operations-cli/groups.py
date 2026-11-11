@@ -1,4 +1,5 @@
 """Compose existing independent commands; preserve their locks and checkpoints."""
+from operation_progress import progress
 import runtime_clock as clock
 import json,subprocess,sys
 from pathlib import Path
@@ -9,7 +10,7 @@ BILLS=['ads-bill-previous','ads-bill-current','fee-sales','fee-fulfillment','fee
 GROUPS={'bills':BILLS,'advertising':['ads-keywords'],'analytics':['products','category','keywords-traffic']}
 
 def execute(root,store,args):
- p=subprocess.run([sys.executable,str(Path(__file__).with_name('run.py')),'--output-root',str(root),'--store-id',store,*args],capture_output=True,text=True,encoding='utf-8',shell=False)
+ p=subprocess.run([sys.executable,str(Path(__file__).with_name('run.py')),'--output-root',str(root),'--store-id',store,*args],stdout=subprocess.PIPE,text=True,encoding='utf-8',shell=False)
  results=[]
  for line in p.stdout.splitlines():
   try:d=json.loads(line)
@@ -21,16 +22,18 @@ def execute(root,store,args):
  if p.returncode or failed:raise RuntimeError((failed or results[-1]).get('error','GROUP_CHILD_INCOMPLETE: 子命令或归档未完成，保留原断点'))
  return results
 
-def run_group(root,profile,name,day,period,start=None,end=None,category_id=None):
+def run_group(root,profile,name,day,period,start=None,end=None,category_id=None,settlement_batch=None):
  now=datetime.now(clock.timezone())
  file=root/'state/analyses'/('group_'+now.strftime('%Y-%m-%d_%H%M%S_%f')+'.json')
  steps=[['collect',f,'--date',day]+(['--fee-interval-days',str(period)] if f.startswith('fee-') else []) for f in GROUPS[name]]
  for command in steps:
   if command[1] in ('ads-keywords','keywords-traffic'):command+=['--start',start,'--end',end]
+  if command[1].startswith('fee-') and settlement_batch:command+=['--settlement-batch',*settlement_batch]
   if command[1]=='category':command+=['--category-id',category_id]
  if name=='analytics':steps+=[['analyze']]
  result={'status':'running','group':name,'store_id':profile['store_id'],'run_date':day,'steps':[{'command':s,'status':'not_started'} for s in steps],'manifest':str(file)};write(file,result)
- for step in result['steps']:
+ for index,step in enumerate(result['steps'],1):
+  progress(f"{name} [{index}/{len(steps)}] {step['command'][1] if step['command'][0]=='collect' else step['command'][0]}")
   try:
    command=list(step['command'])
    step['status']='running';write(file,result)

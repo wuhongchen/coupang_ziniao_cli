@@ -3,6 +3,7 @@ from pathlib import Path
 from datetime import date,datetime,timedelta
 import json,time,hashlib,shutil,zipfile
 import openpyxl
+from operation_progress import progress
 from ziniao_environment import redact
 import ziniao_exports as browser
 from export_downloads import download_directories
@@ -40,10 +41,14 @@ class Collector:
     def ev(self,js):return browser.evaluate(js)
     def text(self):return self.ev('document.body.innerText')
     def wait(self,check,seconds=25):
-        end=time.monotonic()+seconds
+        started=time.monotonic();end=started+seconds;next_notice=started+15
         while time.monotonic()<end:
             result=check()
             if result:return result
+            now=time.monotonic()
+            if now>=next_notice:
+                progress(f"仍在等待页面或报表就绪，已等待 {int(now-started)} 秒")
+                next_notice=now+15
             check_data_access(self.ev('({url:location.href,text:document.body.innerText})'))
             time.sleep(.5)
         raise RuntimeError('PAGE_NOT_READY: 页面等待超时；可能需登录、验证或页面结构改变，保留断点，不重复下载')
@@ -63,6 +68,7 @@ class Collector:
     def files(self):
         return {str(p):[p.stat().st_mtime_ns,p.stat().st_size] for d in download_directories(self.profile) for p in d.rglob('*.xlsx') if p.is_file() and p.resolve().is_relative_to(d.resolve())}
     def receive(self,key,before,seconds=30):
+        progress(f"等待下载并校验文件：{key}")
         def fresh():
             found=[]
             for path,sig in self.files().items():
@@ -84,6 +90,7 @@ class Collector:
             if hashlib.sha256(temporary.read_bytes()).hexdigest()!=digest:raise RuntimeError('补充下载复制校验失败，保留下载断点，不再次点击')
             temporary.replace(target)
         self.run['steps'][key]={'status':'complete','file':str(target),'sha256':digest,'captured_at':datetime.now().astimezone().isoformat()};self.save()
+        progress(f"文件校验通过，已归档：{target.name}")
     def download(self,key,fn):
         step=self.run['steps'].get(key,{})
         if step.get('status')=='complete':return
@@ -91,6 +98,7 @@ class Collector:
         if step.get('status')=='awaiting_download':return self.receive(key,step['before'])
         directories=download_directories(self.profile)
         if not directories or any(not directory.is_dir() for directory in directories):raise ValueError('DOWNLOAD_DIRECTORY_UNAVAILABLE: 本店下载目录不存在或磁盘未挂载；未点击下载')
+        progress(f'正在下载：{key}')
         before=self.files();self.run['steps'][key]={'status':'awaiting_download','before':before};self.save()
         try:fn()
         except Exception as e:self.run['steps'][key]['error']=redact(e);self.save();raise
@@ -110,7 +118,7 @@ class Collector:
         if not row():
             if self.run['steps'].get('广告生成',{}).get('status')=='requested':raise RuntimeError('已请求广告报告但列表未找到；停止重复创建')
             self.ct('기간 설정','label');self.ct('일별','label')
-            browser.click('.ant-picker-suffix');time.sleep(.4)
+            browser.click('.ant-picker-range input:first-of-type');time.sleep(.4)
             # The observed picker initially shows the current month; previous month holds start.
             if not self.ev('!!document.querySelector(\'td[title="'+a+'"]\')'):browser.click('.ant-picker-header-prev-btn');time.sleep(.3)
             browser.click('td[title="'+a+'"]');browser.click('td.ant-picker-cell-in-view[title="'+b+'"]')
@@ -130,6 +138,7 @@ class Collector:
             r=row()
             if r and r['ready']:return r
             self.ct('목록 새로 고침');return None
+        progress('等待逐日广告关键词报告生成')
         r=self.wait(ready,120)
         self.download(key,lambda:browser.click('[row-id="'+r['id']+'"] [col-id="viewReport"] button:last-child'))
         request=self.run['steps'].get('广告生成',{})
@@ -145,7 +154,7 @@ class Collector:
             label=self.wait(lambda:self.ev('[...document.querySelectorAll("label")].map(e=>e.innerText.trim()).find(t=>'+json.dumps(prefixes)+'.some(p=>t.startsWith(p)))'))
             self.ct(label,'label');self.ct('보고서 만들기');self.wait(lambda:any(t in self.text() for t in ('엑셀파일 다운로드','下载Excel文件','下载Excel','下载EXCEL','Excel文件下载')))
             self.download(key,lambda:self.ct('엑셀파일 다운로드'))
-    def fees(self,only=None,period=None):
+    def fees(self,only=None,period=None,settlement_batch=None):
         if not isinstance(period,int) or isinstance(period,bool) or period<=0:raise ValueError('费用下载须提供--fee-interval-days正整数')
         labels=['销售手续费报告','仓库操作费/配送费报告','仓储费率报','退货回收费/重新入库费报告','退仓费报告','退仓配送服务费报告','库存损失赔偿报告','附加服务费报告','评价活动费用报告']
         if only is not None:
@@ -155,8 +164,9 @@ class Collector:
             key=label.replace('/','与')
             from fee_cadence import reusable,metadata
             if self.run['steps'].get(key,{}).get('status')=='awaiting_download':
-                self.receive(key,self.run['steps'][key]['before']);self.run['steps'][key].update(fee_kind=key,cadence=metadata(self.run['steps'][key],self.today,period,False));self.save();continue
-            cached=reusable(self.root,self.profile,key,self.today,period)
+                self.receive(key,self.run['steps'][key]['before']);self.run['steps'][key].update(settlement_batch=settlement_batch,fee_kind=key,cadence=metadata(self.run['steps'][key],self.today,period,False));self.save();continue
+            cached=reusable(self.root,self.profile,key,self.today,period) if not settlement_batch else None
+            if settlement_batch and self.run['steps'].get(key,{}).get('status')=='complete':continue
             if cached:
                 self.run['steps'][key]=cached;self.save();continue
             # A reused checkpoint may become due under a different explicit cadence.
@@ -165,21 +175,39 @@ class Collector:
             self.nav('https://wing.coupang.com/tenants/rfm/settlements/status-new')
             # UI exposes each settlement separately: require one batch rather than guess.
             self.wait(lambda:'Excel下载' in self.text())
+            notice=self.ev("""(()=>{const b=[...document.querySelectorAll('button')].find(e=>e.innerText.trim()==='关闭'&&e.getBoundingClientRect().width&&e.parentElement.parentElement.innerText.includes('不再显示'));if(!b)return false;b.setAttribute('data-wing-close-settlement-notice','true');return true})()""")
+            if notice:browser.click('[data-wing-close-settlement-notice="true"]')
             n=self.ev('[...document.querySelectorAll("button")].filter(e=>e.innerText.trim()==="Excel下载").length')
-            if n!=1:raise RuntimeError('存在多个结算批次，需扩展按周期遍历后再自动运行；不猜测批次')
+            if settlement_batch:
+                pay,ratio,start,end=settlement_batch
+                expected=[pay,ratio,start+'~'+end]
+                matches=self.ev("""(()=>{const rows=[...document.querySelectorAll('tr')].filter(r=>JSON.stringify([0,2,3].map(i=>r.cells[i]?.innerText.trim()))===JSON.stringify(%s));if(rows.length!==1)return false;const buttons=[...rows[0].querySelectorAll('button')].filter(b=>b.innerText.trim()==='Excel下载');if(buttons.length!==1)return false;buttons[0].scrollIntoView({block:'center',behavior:'instant'});buttons[0].setAttribute('data-wing-settlement','selected');return true})()"""%json.dumps(expected))
+                if not matches:raise RuntimeError('未找到与指定结算日、比例和销售确认期完全匹配的唯一批次')
+            elif n!=1:raise RuntimeError(f'结算页面有 {n} 个下载入口，当前命令要求唯一结算批次')
             reportlabel='退仓配送费报告' if label=='退仓配送服务费报告' else label
             if self.run['steps'].get('申请_'+key,{}).get('status')!='requested':
-                self.ct('Excel下载');self.ct(label)
-                self.run['steps']['申请_'+key]={'status':'requested'};self.save();time.sleep(1)
+                if settlement_batch:browser.click('[data-wing-settlement="selected"]')
+                else:self.ct('Excel下载')
+                request_time=datetime.now()
+                self.ct(label)
+                self.run['steps']['申请_'+key]={'status':'requested','requested_at':request_time.isoformat()};self.save();time.sleep(1)
             else:self.ct('结算管理Excel文件下载列表')
             def ready():
-                r=self.ev('''(()=>{let e=[...document.querySelectorAll('tr')].find(e=>e.querySelector('.report-type')?.innerText==='报告 : '+%s);let b=e?.querySelector('button');if(!b||b.disabled)return false;document.querySelectorAll('[data-workbench-fee]').forEach(e=>e.removeAttribute('data-workbench-fee'));b.setAttribute('data-workbench-fee','1');return true})()'''%json.dumps(reportlabel))
+                request=self.run['steps']['申请_'+key]
+                stamp=request.get('requested_at')
+                if not stamp and settlement_batch:stamp=datetime.fromtimestamp(self.file.stat().st_mtime).isoformat()
+                bounds=None
+                if stamp:
+                    point=datetime.fromisoformat(stamp)
+                    bounds=[(point+timedelta(seconds=n)).strftime('%Y-%m-%d %H:%M:%S') for n in (-5,15)]
+                r=self.ev("""(()=>{const bounds=%s;const buttons=[...document.querySelectorAll('tr')].filter(e=>e.querySelector('.report-type')?.innerText==='报告 : '+%s&&(!bounds||(e.cells[0].innerText>=bounds[0]&&e.cells[0].innerText<=bounds[1]))).map(e=>e.querySelector('button')).filter(b=>{if(!b||b.disabled)return false;const r=b.getBoundingClientRect();return b.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2))});if(buttons.length!==1)return false;document.querySelectorAll('[data-workbench-fee]').forEach(e=>e.removeAttribute('data-workbench-fee'));buttons[0].setAttribute('data-workbench-fee','1');return true})()"""%(json.dumps(bounds),json.dumps(reportlabel)))
                 if not r:
-                    buttons=self.ev('[...document.querySelectorAll("button")].filter(e=>e.innerText.trim()==="刷新"&&e.getClientRects().length).length')
-                    if buttons:browser.click('button[data-v-af6d71dd]')
+                    refresh=self.ev("""(()=>{const b=[...document.querySelectorAll('button')].find(b=>{const r=b.getBoundingClientRect();return b.innerText.trim()==='刷新'&&b.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2))});if(!b)return false;b.setAttribute('data-wing-refresh-fees','true');return true})()""")
+                    if refresh:browser.click('[data-wing-refresh-fees="true"]');time.sleep(2)
                 return r
+            progress(f'等待结算报告生成：{key}')
             self.wait(ready,120);self.download(key,lambda:browser.click('[data-workbench-fee="1"]'))
-            self.run['steps'][key].update(fee_kind=key,cadence=metadata(self.run['steps'][key],self.today,period,False));self.save()
+            self.run['steps'][key].update(settlement_batch=settlement_batch,fee_kind=key,cadence=metadata(self.run['steps'][key],self.today,period,False));self.save()
     def pages(self,section=None):
         if section not in (None,'category','products','keywords'):raise ValueError('未知页面类别')
         if section in (None,'category') and not self.category_id:raise ValueError('类目采集必须提供--category-id')
@@ -195,6 +223,9 @@ class Collector:
         pages=[];files=[]
         if section in (None,'category'):
             self.nav(f'https://wing.coupang.com/tenants/business-insight/category-analysis/detail?c_code={self.category_id}')
+            self.wait(lambda:'Top竞争商品' in self.text() or '立即订阅查看详情' in self.text() or '免费试用商业洞察' in self.text())
+            if 'Top竞争商品' not in self.text() and ('立即订阅查看详情' in self.text() or '免费试用商业洞察' in self.text()):
+                raise RuntimeError('DATA_PERMISSION_DENIED: 品类榜单要求订阅商业洞察')
             for tab in ['Top竞争商品','Top关键词','Top品牌']:
                 self.ct(tab,'a');self.wait(lambda:('查看Top10关键词' in self.text()) if tab=='Top竞争商品' else ('查看Top10商品' in self.text() and ('搜索量' in self.text() if tab=='Top关键词' else '搜索量' not in self.text())) )
                 nums=self.ev('[...document.querySelectorAll("a")].map(e=>e.innerText.trim()).filter(t=>/^[1-9]$/.test(t))') or ['1']
@@ -215,7 +246,8 @@ class Collector:
             if b:ids.update(r['id'] for r in b['payload'])
         if not ids:raise RuntimeError('DATA_UNAVAILABLE: 没有已核验选项，不能将零个选项当作采集成功')
         dest=self.audit/'选项流量关键词';dest.mkdir(exist_ok=True)
-        for oid in sorted(ids):
+        for index,oid in enumerate(sorted(ids),1):
+            progress(f"选项关键词流量 [{index}/{len(ids)}]")
             p=dest/(oid+'.json')
             if p.exists():
                 previous=json.loads(p.read_text());body=previous['pages'][0]['text'] if previous.get('pages') else ''
@@ -223,7 +255,9 @@ class Collector:
             d={'option_id':oid,'pages':[],'views':{},'errors':[],'requested_period':[str(self.start),str(self.end)]}
             try:
                 self.nav(f'https://wing.coupang.com/tenants/business-insight/sales-analysis/vendor-item-summary?vendorItemId={oid}&start_date={self.start}&end_date={self.end}')
-                self.wait(lambda:f'选项 ID: {oid}' in self.text());self.wait(lambda:'搜索曝光量' in self.text() or '搜索词分析数据不足' in self.text())
+                self.wait(lambda:f'选项 ID: {oid}' in self.text())
+                if '订阅商业洞察，查看强化版数据' in self.text() and '搜索曝光量' not in self.text():raise RuntimeError('DATA_PERMISSION_DENIED: 关键词明细要求订阅商业洞察')
+                self.wait(lambda:'搜索曝光量' in self.text() or '搜索词分析数据不足' in self.text())
                 for n in range(1,51):
                     selector=f'span[data-wuic-attrs^="page:{n}"] a'
                     if n>1:

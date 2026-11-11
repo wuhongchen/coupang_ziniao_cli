@@ -1,4 +1,5 @@
 """Resumable ZiNiao UI exports. Native save dialogs are handled by the scheduled agent."""
+from operation_progress import progress,finish
 import runtime_clock as clock
 import argparse
 from datetime import datetime,date,timedelta
@@ -135,6 +136,7 @@ def arm_download(run,ref):
 def receive_download(run):
     step=run['steps'][run['index']];directories=download_directories(PROFILE)
     if not directories:raise ValueError('自动模式需要configure --download-dir指定紫鸟实际保存目录')
+    progress(f"等待 {step['kind']} 下载到店铺目录（{step['start']} 至 {step['end']}）")
     path=None;deadline=time.monotonic()+20
     while time.monotonic()<deadline:
         path=locate_fresh_export(step['kind'],run['started_at'],directories,run.get('download_before'))
@@ -144,6 +146,7 @@ def receive_download(run):
         return {'status':'awaiting_download','step':step,
                 'instruction':'尚无可校验的新XLSX。检查紫鸟自动保存开关、重启是否生效及本店下载目录；保持参数重跑run续传，不重复点击。'}
     result=accept_export(path,step['kind'],step['start'],step['end'],step.get('provisional',False),ROOT,PROFILE['store_id'],fresh_download=True)
+    progress(f"原表校验通过，已导入 {result['records']} 条记录")
     run['results'].append(result);run['index']+=1;run['status']='ready';run.pop('download',None);run.pop('download_before',None);run.pop('error',None);write(run)
     return {'status':'imported','completion_source':'new-file-zip-crc-and-schema','file':str(path),**result}
 
@@ -200,6 +203,7 @@ def next_export(run):
     if run.get('status') in ('awaiting_save','awaiting_download'):return receive_download(run)
     run.pop('error',None)
     step=run['steps'][run['index']];kind=step['kind']
+    progress(f"报表 [{run['index']+1}/{len(run['steps'])}] 正在打开 {kind}，{step['start']} 至 {step['end']}")
     if kind.startswith('sales'):
         url=step.get('url') or f"https://wing.coupang.com/tenants/business-insight/sales-analysis?start_date={step['start']}&end_date={step['end']}"
         if step.get('date_picker'):
@@ -216,12 +220,13 @@ def next_export(run):
         if parsed.hostname!='wing.coupang.com' or parsed.path!='/tenants/business-insight/sales-analysis' or query.get('start_date')!=[step['start']] or query.get('end_date')!=[step['end']]:raise RuntimeError('页面请求日期不匹配')
         step['provisional']=bool(step.get('provisional') or info.get('pending'))
         call('snapshot',{})
-        selector='span.'+'.'.join(info['selectors'][0]['cls'].split())
-        click(selector)
+        marked=evaluate("""(()=>{const items=[...document.querySelectorAll('span')].filter(e=>e.innerText.trim()==='下载Excel'&&e.getBoundingClientRect().width);if(items.length!==1)return false;items[0].scrollIntoView({block:'center',behavior:'instant'});items[0].setAttribute('data-wing-sales-menu','true');return true})()""")
+        if not marked:raise RuntimeError('销售导出按钮无法唯一定位')
+        click('[data-wing-sales-menu="true"]')
         menu=evaluate("""Array.from(document.querySelectorAll('div[class*="_dropdown_"] > div')).map((e,i)=>({i:i+1,text:e.innerText}))""")
         target=next((x for x in menu if x['text'].strip()=='按商品销售'),None)
         if not target:raise RuntimeError('按商品销售导出入口已变化')
-        evaluate("""Array.from(document.querySelectorAll('div[class*="_dropdown_"] > div')).filter(e=>e.innerText.trim()==='按商品销售').forEach(e=>e.setAttribute('data-wing-sales-export','true'));true""")
+        evaluate("""Array.from(document.querySelectorAll('div[class*="_dropdown_"] > div')).filter(e=>e.innerText.trim()==='按商品销售'&&e.getBoundingClientRect().width).forEach(e=>([...e.querySelectorAll('span')].find(t=>t.innerText.trim()==='按商品销售')||e).setAttribute('data-wing-sales-export','true'));true""")
         arm_download(run,'[data-wing-sales-export="true"]')
     else:
         call('navigate',{'url':step.get('url') or 'https://wing.coupang.com/tenants/rfm-inventory/management/list'})
@@ -234,9 +239,9 @@ def next_export(run):
         item=next((b for b in info['buttons'] if b['text'].strip().startswith('Excel下载')),None)
         if not item:raise RuntimeError('库存导出按钮未找到')
         # Set a stable observed marker only on the exact known export button.
-        evaluate('Array.from(document.querySelectorAll("button")).filter(e=>e.innerText.trim().startsWith("Excel下载")).forEach(e=>e.setAttribute("data-wing-export","inventory"));true')
+        marked=evaluate("""(()=>{const buttons=[...document.querySelectorAll('button')].filter(e=>e.innerText.trim()==='Excel下载'&&e.getBoundingClientRect().width);if(buttons.length!==1)return false;buttons[0].scrollIntoView({block:'center',inline:'center',behavior:'instant'});buttons[0].setAttribute('data-wing-export','inventory');return true})()""")
+        if not marked:raise RuntimeError('库存导出按钮无法唯一定位')
         click('button[data-wing-export="inventory"]')
-        index={'inventory':1,'returns':3,'movement':4}[kind]
         if kind=='movement':
             evaluate("""Array.from(document.querySelectorAll('div.selector > div > span')).filter(e=>e.innerText.trim()==='下载库存变动明细Excel').forEach(e=>e.setAttribute('data-wing-movement','true'));true""")
             click('span[data-wing-movement="true"]')
@@ -245,7 +250,10 @@ def next_export(run):
             click('[data-wing-all-movement="true"]')
             arm_download(run,'[data-wing-download-movement="true"]')
         else:
-            arm_download(run,f'div.selector > div:nth-child({index})')
+            label='Excel下载申请' if kind=='inventory' else '下载退货明细Excel'
+            marked=evaluate("""(()=>{const items=[...document.querySelectorAll('div.selector > div')].filter(e=>e.innerText.trim()===%s&&e.getBoundingClientRect().width);if(items.length!==1)return false;items[0].setAttribute('data-wing-report-kind',%s);return true})()"""%(json.dumps(label),json.dumps(kind)))
+            if not marked:raise RuntimeError('未找到可见的下载选项：'+label)
+            arm_download(run,f'[data-wing-report-kind="{kind}"]')
     return receive_download(run)
 
 
@@ -318,8 +326,10 @@ def main(argv=None):
                     break
             elif a.next:out=next_export(run)
             else:out=run
+        finish("wing-export",out.get("status","complete"))
         print(json.dumps(out,ensure_ascii=False));return 10 if out.get('status') in ('awaiting_save','awaiting_download') else 0
     except Exception as exc:
+        finish('wing-export','failed')
         if run is not None:run['error']=runtime.redact(exc);write(run)
         failure=runtime.record_failure(a.output_root,'core-export',exc)
         print(json.dumps({'status':'failed','error':runtime.redact(exc),'failure_record':failure},ensure_ascii=False));return 1

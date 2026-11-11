@@ -3,8 +3,14 @@ from pathlib import Path
 from datetime import datetime
 from urllib.parse import urlsplit
 import json,re,subprocess,time
+from operation_progress import progress
 from ziniao_environment import executable,redact
 PAGE="({url:location.href,title:document.title,text:document.body.innerText.slice(0,2000),captcha:[...document.querySelectorAll('iframe[src*=captcha],input[name=captcha]')].some(e=>e.getClientRects().length)})"
+FIRST_USE = (
+ "首次使用请按照《Agent CLI 使用方式及能力介绍》完成紫鸟 API 开通与配置。\n"
+ "https://yxgb3sicy7.feishu.cn/wiki/JXOLwgkFIinBlSkKov6cpTEXn4g"
+)
+
 def page_error(info):
  url=info.get('url','');text=info.get('text','')
  if info.get('captcha') or '/captcha' in url.lower() or re.search(r'^(?:请完成安全验证|安全验证|자동입력 방지)',text.strip()):return 'CAPTCHA_REQUIRED'
@@ -26,6 +32,8 @@ def invoke(args):
  return result.stdout+('\n'+result.stderr if args==['doctor'] else '')
 def doctor():
  text=re.sub(r'\x1b\[[0-9;]*m','',invoke(['doctor']))
+ if '未找到配置文件' in text:
+  raise RuntimeError('ZINIAO_NOT_READY: '+FIRST_USE)
  if not all(marker in text for marker in ('API Key 有效','客户端登录用户','Bridge 连通正常')) or any(mark in text.split('检查 Skills')[0] for mark in ('✗','✕','❌')) or re.search(r'CLIENT_LOGGED_OUT|CLIENT_ACCOUNT_MISMATCH|API Key (?:无效|失效)|账[号户]不(?:一致|匹配)',text):raise RuntimeError('ZINIAO_NOT_READY: API Key、客户端登录或Bridge未通过检查；请运行ziniao-cli doctor核对，不开始下载')
  account=re.search(r'客户端登录用户[:：]\s*([^\r\n]+)',text)
  return {'client_account':account.group(1).strip() if account else None,'api_key_valid':True,'client_logged_in':True,'bridge_connected':True,'terminal_binding_verified':'不支持终端绑定' not in text}
@@ -43,6 +51,7 @@ def unpack(text):
  if d.get('exceptionDetails') or 'result' not in d:raise RuntimeError('PAGE_READ_FAILED: 页面结构或读取能力异常')
  return json.loads(d['result']) if isinstance(d['result'],str) else d['result']
 def check(root,profile,require_wing=False):
+ progress('正在核验紫鸟连接、登录状态和店铺身份')
  report={'status':'running','store_id':profile['store_id'],'browser_id':profile['browser_id'],'checked_at':datetime.now().astimezone().isoformat()};file=Path(root)/'state/preflight/latest.json';file.parent.mkdir(parents=True,exist_ok=True)
  try:
   checkpoint=Path(root)/'state/collection_run.json'

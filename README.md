@@ -4,6 +4,10 @@
 
 仓库只包含通用代码和虚构测试样例；不提供店铺配置、业务数据、密钥或登录态。广告功能仅下载数据，不调价、不改预算、不增删词、不发布广告；不创建定时任务、不直调 Coupang 页面外数据接口。
 
+## 首次使用
+
+请按照[《Agent CLI 使用方式及能力介绍》](https://yxgb3sicy7.feishu.cn/wiki/JXOLwgkFIinBlSkKov6cpTEXn4g)完成紫鸟 API 开通与配置。
+
 ## 安装
 
 需要 Python 3.10+、已安装的 `ziniao-cli`、运行中的紫鸟客户端及合法店铺权限。
@@ -17,6 +21,14 @@ OPS="$PWD/operations-cli/wing-ops"
 "$OPS" catalog
 "$OPS" doctor
 "$OPS" stores
+```
+
+## 运行进度
+
+运行命令时，终端会实时显示带时间的进度，包括当前步骤、等待下载、文件校验和归档。组合命令显示步数，例如 `bills [3/11] fee-sales`。进度写入标准错误，标准输出保留原有 JSON 格式。在 Bash 或 Zsh 中，可同时在终端查看进度并保存本次日志：
+
+```bash
+"$OPS" --output-root "$DATA_ROOT" check-store >result.json 2> >(tee run.log >&2)
 ```
 
 ## 配置与多店铺
@@ -43,6 +55,19 @@ API Key 不接收命令行明文，可选择本机已有配置，或用以下一
 
 动态 Key 使用验证过的临时隔离目录，结束清理。动态 Key 与配置目录不能同时指定。时区通过全局 `--timezone "$TIMEZONE"` 或环境变量 `WING_TIMEZONE` 传入；省略时沿用执行机器本地时区。子命令及归档继承本次设置。平台韩国业务日及归因定义不随本地运行时区改变。
 
+## 从已有报表选择批次和类目
+
+`choices` 列出当前店铺已校验归档里的结算批次或实际销售类目。加 `--match` 会使用唯一匹配项；多个匹配项时，终端会显示编号供选择。非交互运行时会返回候选清单，供调用方缩小范围。
+
+```bash
+"$OPS" --output-root "$DATA_ROOT" choices settlement
+"$OPS" --output-root "$DATA_ROOT" choices category
+"$OPS" --output-root "$DATA_ROOT" bills --fee-interval-days 1 --match "2026-11-08 70%"
+"$OPS" --output-root "$DATA_ROOT" collect category --match "차렵이불"
+```
+
+类目名称沿用销售手续费原表的语言。新店首次运行尚无归档时，可以使用下面的显式参数。
+
 ## 显式传入采集范围
 
 不再内置类目、广告查询天数、销售分析天数或费用下载间隔。缺参数时失败，不猜测下载范围。
@@ -66,13 +91,13 @@ API Key 不接收命令行明文，可选择本机已有配置，或用以下一
 "$OPS" --output-root "$DATA_ROOT" collect sales-daily --date "$BUSINESS_DATE"
 "$OPS" --output-root "$DATA_ROOT" collect sales-window --start "$START_DATE" --end "$END_DATE"
 "$OPS" --output-root "$DATA_ROOT" collect inventory
-"$OPS" --output-root "$DATA_ROOT" collect images --all
+"$OPS" --output-root "$DATA_ROOT" collect images --all --target-id "$WING_TAB_ID"
 "$OPS" --output-root "$DATA_ROOT" collect reviews
 "$OPS" --output-root "$DATA_ROOT" analyze
 "$OPS" --output-root "$DATA_ROOT" archive
 ```
 
-`--date` 是运行/检查日，不是任意账期。费用只下载当前唯一可见结算批次；多个批次停止，不猜测。费用间隔为成功下载后的滚动正整数天数。广告账单仍按页面本月/上月选择；广告归因字段为平台原始定义，不能通过参数伪造其他归因窗口。
+`--date` 是运行/检查日，不是任意账期。费用页只有一个批次时可以直接下载。出现多个批次时，给单项费用或 `bills` 命令加上 `--settlement-batch 结算日 支付比例 销售确认开始日 销售确认结束日`，例如 `collect fee-sales --fee-interval-days 1 --settlement-batch 2026-12-04 70 2026-11-02 2026-11-08`。程序只选择与四个值完全匹配的唯一行。费用间隔为成功下载后的滚动正整数天数。广告账单仍按页面本月/上月选择；广告归因字段为平台原始定义，不能通过参数伪造其他归因窗口。
 
 `--days` 取正整数，销售采集限制在单次可控范围内。已完成销售轮次可用 `--refresh` 保留旧历史后重下。修改查询范围不能复用原查询的完成标记。
 
