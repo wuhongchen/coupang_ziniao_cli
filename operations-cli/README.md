@@ -2,13 +2,14 @@
 
 ### 火箭选项销售价
 
-在已绑定店铺的中文 Wing 价格管理页查询单个火箭选项，按韩元金额降低销售价。将紫鸟 CLI 加入 PATH，使用已安装项目依赖的 Python 运行：
+改价前自动读取目标火箭选项的调价模式。固定售价用 `--to` 指定，自动调价须同时提供 `--min-price` 和 `--max-price`，使用 Wing 表单中该选项的最低价和设定价格字段。金额以韩元为单位。
 
 ```sh
-python operations-cli/rocket_price.py --output-root "$DATA_ROOT" --option-id "$OPTION_ID" --expect "$OLD_PRICE" --to "$NEW_PRICE"
+python operations-cli/rocket_price.py set --output-root "$DATA_ROOT" --option-id "$OPTION_ID" --expect "$CURRENT_PRICE" --to "$NEW_PRICE"
+python operations-cli/rocket_price.py set --output-root "$DATA_ROOT" --option-id "$OPTION_ID" --expect "$CURRENT_PRICE" --min-price "$MIN_PRICE" --max-price "$MAX_PRICE"
 ```
 
-默认仅预览。追加 `--apply` 后核对旧售价、选中唯一选项、提交差额并重新搜索回读。返回值包含售价、页面最终购买价和时间。若已达目标，直接返回。促销锁价返回 `blocked_promotion`；其他未核实结果返回 `unverified`，应先重新查询。平台可能延迟生效。
+默认仅预览。追加 `--apply` 提交，然后重新搜索同一选项，固定售价核对开关与售价，自动调价核对开关与两个边界。省略子命令时同样先判断模式。平台可能延迟生效；若返回 `unverified`，先查询再决定是否重试。
 
 查询指定火箭选项的自动调价开关、上下限、销售价和最终购买价：
 

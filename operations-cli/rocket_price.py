@@ -1,4 +1,4 @@
-"""查询火箭选项价格、关闭自动调价或降低销售价。"""
+"""查询火箭选项价格、关闭自动调价或设置销售价格。"""
 import argparse
 import json
 import re
@@ -33,8 +33,10 @@ def auto_result(action, before, query, disable, apply, expected):
 def run(args, profile):
     if not re.fullmatch('[0-9]+', args.option_id):
         raise ValueError('选项 ID 必须为数字')
-    if args.action == 'lower' and not (args.to and args.expect and 0 < args.to < args.expect):
-        raise ValueError('降价需要 --expect 和低于原价的正整数 --to')
+    if args.action in ('set','lower') and (args.expect is None or args.expect <= 0):
+        raise ValueError('请用 --expect 指定当前售价')
+    if args.action in ('auto-status','auto-off') and (args.minimum is not None or args.maximum is not None):
+        raise ValueError('仅改价操作接受价格区间')
     if args.action == 'auto-off' and not (args.expect and args.expect > 0 and args.to is None):
         raise ValueError('关闭自动调价需要 --expect 当前售价')
     if args.action == 'auto-status' and (args.apply or args.expect is not None or args.to is not None):
@@ -82,9 +84,7 @@ def run(args, profile):
         wait("return !!document.querySelector('.advanced-search-input .btn-search')")
         ev("""const e=document.querySelector('.advanced-search-input input');input(e,id);
               document.querySelector('.advanced-search-input .btn-search').click();return true""")
-        read = """return {name:row.cells[1].innerText,sale:price(),final:row.querySelector('.price-detail-text')?.innerText}"""
-        if args.action != 'lower':
-            read = auto_controls + r"""
+        read = auto_controls + r"""
                 if(!toggle)return null;
                 const range=panel.innerText.match(/₩([\d,]+)\s*[~～]\s*₩([\d,]+)/);
                 if(!range && toggle.checked)return null;
@@ -100,7 +100,7 @@ def run(args, profile):
         return data
 
     before=query()
-    if args.action != 'lower':
+    if args.action in ('auto-status','auto-off'):
         def disable():
             guard = "if(!("+target_check+"))throw Error('选项变化');"+auto_controls
             guard += f"if(Number(price().replace(/[^0-9]/g,''))!=={args.expect})throw Error('售价变化');"
@@ -114,46 +114,111 @@ def run(args, profile):
                 progress('未观察到成功提示，正在重新查询实际状态')
         return {'option_id': args.option_id, 'store_id': profile['store_id'],
                 **auto_result(args.action, before, query, disable, args.apply, args.expect)}
-    result={'option_id':args.option_id,'before':before,'target':args.to}
-    if before['sale']==args.to:return dict(result,status='already_at_target')
+    target = price_target(before, args.to, args.minimum, args.maximum, args.action)
+    result={'option_id':args.option_id,'before':before,'target':target}
+    if matches_target(before, target):return dict(result,status='already_at_target')
     if before['sale']!=args.expect:raise ValueError(f'当前售价与预期不符：{before}')
     if not args.apply:return dict(result,status='preview')
-    progress('已核对火箭选项与原售价，准备修改单个选项')
-    ev("""if(rows.length!==1||!row||checked().length)throw Error('商品选择异常');
+
+    # Guard each write against a changed option, pricing mode or base price.
+    guard = "if(!("+target_check+"))throw Error('选项变化');"+auto_controls
+    guard += f"if(toggle?.checked!=={json.dumps(before['auto_enabled'])} || Number(price().replace(/[^0-9]/g,''))!=={args.expect})throw Error('调价模式或售价变化');"
+    ev(guard+"""if(checked().length)throw Error('商品选择异常');
           row.querySelector('td:first-child input').click();return true""")
-    ev("""if(checked().length!==1||checked()[0]!==row)throw Error('选项变化');
-          one('button','批量修改所选商品').click();return true""")
-    ev("""const labels=[...document.querySelectorAll('span,div,a,button,li')].filter(
-              e=>!e.children.length&&visible(e)&&e.innerText.trim()==='变更价格');
-          if(labels.length!==1)throw Error('找不到唯一变更价格入口');
+    selected=guard+"if(checked().length!==1||checked()[0]!==row)throw Error('选项变化');"
+    ev(selected+"one('button','批量修改所选商品').click();return true")
+    label='批量编辑自动调价' if before['auto_enabled'] else '变更价格'
+    ev(selected+"const label="+json.dumps(label)+""";
+          const labels=[...document.querySelectorAll('span,div,a,button,li')].filter(
+              e=>!e.children.length&&visible(e)&&e.innerText.trim()===label);
+          if(labels.length!==1)throw Error('找不到唯一的价格编辑入口');
           labels[0].click();return true""")
-    modal="""const box=document.querySelector('.price-desc')?.closest('[data-wuic-partial=widget]');
-      if(!box||box.querySelector('.price-desc').innerText.trim()!=='您所选的1项商品将全部更改' ||
-        box.querySelector('.price-option').innerText.trim()!=='减少' ||
-        box.querySelector('.price-unit .dropdown-part').innerText.trim()!=='韩元' ||
-        checked().length!==1 || checked()[0]!==row || Number(price().replace(/[^0-9]/g,''))!==EXPECTED)
-        throw Error('选项或价格变更条件不匹配');
-      const field=box.querySelector('.price-unit input');""".replace('EXPECTED',str(args.expect))
-    delta=str(args.expect-args.to)
-    ev(modal+"input(field,'"+delta+"');return true")
-    ev(modal+"if(field.value.replace(/,/g,'')!=='"+delta+"')throw Error('差额不一致');one('button','确认',box).click();return true")
+    if before['auto_enabled']:
+        edit_range(ev, wait, selected, before, target)
+    else:
+        edit_sale(ev, selected, args.expect, args.to)
     time.sleep(2)
     notice=ev("return document.body.innerText.split('对此页进行评分').pop().trim().slice(0,400)")
     if notice:progress(notice)
     after=query()
-    status='verified' if after['sale']==args.to else 'unverified'
+    status='verified' if matches_target(after,target) else 'unverified'
     if status=='unverified' and '프로모션을 종료' in notice:
         status='blocked_promotion'
     return dict(result,after=after,status=status,notice=notice)
+
+
+def price_target(before, sale, minimum, maximum, action):
+    if before['auto_enabled']:
+        if minimum is None or maximum is None or not 0 < minimum < maximum:
+            raise ValueError('该选项已开启自动调价，请同时传 --min-price 和 --max-price，最低价须为正数并低于最高价')
+        if sale is not None and sale != maximum:
+            raise ValueError('自动调价按区间设置；如提供 --to，其值须等于最高设定价')
+        return {'auto_enabled':True,'minimum':minimum,'maximum':maximum}
+    if minimum is not None or maximum is not None or sale is None or sale <= 0:
+        raise ValueError('该选项为固定售价，请只用 --to 指定正整数售价')
+    if action=='lower' and sale>before['sale']:
+        raise ValueError('提高售价请使用 set')
+    return {'auto_enabled':False,'sale':sale}
+
+
+def matches_target(state, target):
+    return all(state.get(key)==value for key,value in target.items())
+
+
+def edit_range(ev, wait, selected, before, target):
+    form = selected + r"""
+        const boxes=[...document.querySelectorAll('[data-wuic-partial=widget]')].filter(
+            b=>visible(b)&&b.innerText.includes('批量修改自动调价'));
+        if(boxes.length!==1)throw Error('自动调价表单不唯一');
+        const box=boxes[0], entries=box.querySelectorAll('tbody tr');
+        if(entries.length!==1)throw Error('表单须只包含一个选项');
+        const entry=entries[0], name=entry.querySelector('.product-title')?.innerText.trim();
+        if(!name||!row.cells[1].innerText.split('\n').map(t=>t.trim()).includes(name)||
+           Number(entry.cells[1].innerText.replaceAll(',',''))!==Number(price().replace(/[^0-9]/g,'')))
+            throw Error('表单商品或售价不一致');
+        const cells=[...entry.querySelectorAll('td.editable-td')];
+        if(cells.length!==2)throw Error('未找到上下限字段');
+        const values=()=>cells.map(c=>Number(c.querySelector('input').value.replaceAll(',','')));
+    """
+    expected=[before['minimum'],before['maximum']]
+    desired=[target['minimum'],target['maximum']]
+    wait("return !!document.querySelector('td.editable-td')")
+    # Expand the range first when the new minimum exceeds the old maximum.
+    order=(1,0) if desired[0]>=expected[1] else (0,1)
+    for i in order:
+        if desired[i]==expected[i]:continue
+        check=f"if(JSON.stringify(values())!==JSON.stringify({expected}))throw Error('调价区间已变化');"
+        ev(form+check+f"const e=cells[{i}].querySelector('input');if(e.disabled)throw Error('字段不可编辑');e.focus();input(e,'{desired[i]}');return true")
+        expected[i]=desired[i]
+    ev(form+f"if(JSON.stringify(values())!==JSON.stringify({desired}))throw Error('上下限回读不符');one('button','确认',box).click();return true")
+
+
+def edit_sale(ev, selected, expected, sale):
+    direction='减少' if sale<expected else '增加'
+    box_script=selected+"""const box=document.querySelector('.price-desc')?.closest('[data-wuic-partial=widget]');
+      if(!box||box.querySelector('.price-desc').innerText.trim()!=='您所选的1项商品将全部更改' ||
+        box.querySelector('.price-unit .dropdown-part').innerText.trim()!=='韩元' ||
+        checked().length!==1 || checked()[0]!==row || Number(price().replace(/[^0-9]/g,''))!==EXPECTED)
+        throw Error('选项或价格变更条件不匹配');
+      const field=box.querySelector('.price-unit input');""".replace('EXPECTED',str(expected))
+    if sale>expected:
+        ev(box_script+"box.querySelector('.price-option button').click();return true")
+        ev(box_script+"one('span:not(:has(*)),li:not(:has(*)),div:not(:has(*)),button:not(:has(*))','增加').click();return true")
+    modal=box_script+f"if(box.querySelector('.price-option').innerText.trim()!=='{direction}')throw Error('调价方向不匹配');"
+    delta=str(abs(expected-sale))
+    ev(modal+"input(field,'"+delta+"');return true")
+    ev(modal+"if(field.value.replace(/,/g,'')!=='"+delta+"')throw Error('差额不一致');one('button','确认',box).click();return true")
 
 
 if __name__=='__main__':
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output-root',type=Path,required=True)
     parser.add_argument('--option-id',required=True)
-    parser.add_argument('action',nargs='?',choices=('lower','auto-status','auto-off'),default='lower')
+    parser.add_argument('action',nargs='?',choices=('set','lower','auto-status','auto-off'),default='set')
     parser.add_argument('--expect',type=int)
     parser.add_argument('--to',type=int)
+    parser.add_argument('--min-price',dest='minimum',type=int)
+    parser.add_argument('--max-price',dest='maximum',type=int)
     parser.add_argument('--apply',action='store_true')
     args=parser.parse_args()
     with browser_lease(args.output_root):

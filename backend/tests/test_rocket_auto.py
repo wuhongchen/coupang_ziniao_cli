@@ -43,3 +43,27 @@ class RocketAutoTest(unittest.TestCase):
         for enabled, sale in ((True, 21000), (False, 22000)):
             self.query.return_value = {'auto_enabled': enabled, 'sale': sale}
             self.assertEqual(self.run_action()['status'], 'unverified')
+
+
+class PriceModeTests(unittest.TestCase):
+    def test_automatic_mode_requires_both_bounds(self):
+        from rocket_price import price_target
+        for low, high in [(None,None),(None,24000),(21000,None),(20000,20000),(0,22000)]:
+            with self.subTest(low=low,high=high), self.assertRaises(ValueError):
+                price_target({'auto_enabled':True}, 22000, low, high, 'set')
+
+    def test_automatic_verification_requires_both_bounds_and_mode(self):
+        from rocket_price import price_target, matches_target
+        target=price_target({'auto_enabled':True}, None, 21000, 23000, 'set')
+        self.assertTrue(matches_target(dict(target,sale=21500),target))
+        self.assertFalse(matches_target(dict(target,maximum=24000),target))
+        self.assertFalse(matches_target(dict(target,auto_enabled=False),target))
+
+    def test_fixed_price_accepts_raise_and_rejects_bounds(self):
+        from rocket_price import price_target, matches_target
+        state={'auto_enabled':False,'sale':21000}
+        target=price_target(state, 22000, None, None, 'set')
+        self.assertEqual(target,dict(state,sale=22000))
+        self.assertFalse(matches_target(dict(target,auto_enabled=True),target))
+        with self.assertRaises(ValueError):
+            price_target(state,22000,19000,22000,'set')
